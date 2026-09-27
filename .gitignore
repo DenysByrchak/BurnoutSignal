@@ -1,0 +1,10 @@
+*.xml
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[codz]
+*$py.class
+
+# Huge dataset
+burnout_dataset.csv
+
+.idea/*
