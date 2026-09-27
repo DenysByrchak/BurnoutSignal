@@ -1,13 +1,29 @@
 import sys
 import functools
 from PyQt6.QtWidgets import QApplication, QWidget, QMenu
-from PyQt6.QtCore import Qt, QRectF
+from PyQt6.QtCore import Qt, QRectF, QTimer
 from PyQt6.QtGui import QPainter, QColor, QFont
 from PyQt6.QtSvg import QSvgRenderer
 
 from config import load_settings, save_settings, USER_CONFIG, THEMES, POLLING_RATE_SECONDS
 from agent import BurnoutSignalAgent
 from ui_components import TelemetrySettingsPopup, CustomizePopup, InterventionWindow
+
+# How often the HUD flips between showing the numeric score and an emote,
+# in milliseconds. Every time this fires we flip a boolean, so the actual
+# on-screen cadence is "5 seconds of score, then 5 seconds of emote".
+EMOTE_SWITCH_INTERVAL_MS = 5000
+
+# Maps FacialExpressionTracker.expression_label -> what the HUD draws.
+# Plain keyboard characters instead of emoji, so it renders consistently
+# with any font (no need to hunt for a color-emoji font like Segoe UI
+# Emoji). "looking" is also the fallback for any label we don't recognize.
+EXPRESSION_TEXT = {
+    "looking": "o_o",
+    "smiling": ":D",
+    "eyes_closed": "-_-",
+    "tired": "zzz",
+}
 
 
 class FloatingHUD(QWidget):
@@ -31,8 +47,23 @@ class FloatingHUD(QWidget):
         # Used while the user is dragging the HUD around the screen.
         self.drag_position = None
 
+        # Whether the ring is currently showing an emote instead of the
+        # numeric score. Flipped every EMOTE_SWITCH_INTERVAL_MS by
+        # emote_timer below.
+        self.showing_emote = False
+
         self.agent.score_updated.connect(self.update_score)
         self.agent.trigger_alert.connect(self.trigger_ui)
+
+        # Periodically flips between the score and an emote. Reads
+        # self.agent.facial_tracker directly rather than over a Qt signal -
+        # it's just a plain string being read for display, so a little bit
+        # of staleness between the tracker's own 2-second poll and this
+        # 5-second flip doesn't matter.
+        self.emote_timer = QTimer(self)
+        self.emote_timer.setInterval(EMOTE_SWITCH_INTERVAL_MS)
+        self.emote_timer.timeout.connect(self._toggle_emote_display)
+        self.emote_timer.start()
 
         self.initUI()
 
@@ -64,6 +95,28 @@ class FloatingHUD(QWidget):
         # Slot connected to the agent's score_updated signal.
         self.score = new_score
         self.update()
+
+    def _toggle_emote_display(self):
+        # Only bother switching to an emote if facial tracking is actually
+        # producing live readings right now. Otherwise there's nothing real
+        # to show, so just keep the numeric score up.
+        facial_tracker = self.agent.facial_tracker
+
+        if not facial_tracker.camera_available:
+            self.showing_emote = False
+        else:
+            self.showing_emote = not self.showing_emote
+
+        self.update()
+
+    def _current_display_text(self):
+        # What the center of the ring should show right now: the score, or
+        # an emote for whatever the facial tracker is currently seeing.
+        if not self.showing_emote:
+            return f"{int(self.score)}"
+
+        expression_label = self.agent.facial_tracker.expression_label
+        return EXPRESSION_TEXT.get(expression_label, EXPRESSION_TEXT["looking"])
 
     def trigger_ui(self):
         # Slot connected to the agent's trigger_alert signal (score hit 100).
@@ -157,11 +210,20 @@ class FloatingHUD(QWidget):
         renderer.render(painter, QRectF(self.rect()))
 
         font_size = max(10, int(self.width() * 0.2))
+        display_text = self._current_display_text()
 
         painter.setPen(QColor("#e8e4f0"))
-        font = QFont("Helvetica", font_size, QFont.Weight.Bold)
+
+        if self.showing_emote:
+            # Text like "-_-" or "o_o" runs wider than a couple of digits
+            # at the same point size, so it gets a smaller size to keep it
+            # from crowding the edges of the ring.
+            font = QFont("Helvetica", int(font_size * 0.7), QFont.Weight.Bold)
+        else:
+            font = QFont("Helvetica", font_size, QFont.Weight.Bold)
+
         painter.setFont(font)
-        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, f"{int(self.score)}")
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, display_text)
 
     def mousePressEvent(self, event):
         # Start of a drag - remember the offset between the click point and
